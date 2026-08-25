@@ -1,9 +1,8 @@
-<<<<<<< HEAD
 # Agentic RAG Research Assistant
 
-Step-by-step Agentic RAG system. **This repository currently implements Step 1 only: document ingestion and PDF parsing.**
+Step-by-step Agentic RAG system. **This repository currently implements Step 1 (document ingestion and PDF parsing) and Step 2 (document chunking).**
 
-Later steps (chunking, embeddings, Qdrant, hybrid retrieval, reranking, LangGraph, LLMs) are intentionally not included yet.
+Later steps (embeddings, Qdrant, hybrid retrieval, reranking, LangGraph, LLMs) are intentionally not included yet.
 
 ```
 PDF upload
@@ -12,7 +11,11 @@ Save to data/documents/
     ↓
 Page-by-page PDF parsing (pypdf)
     ↓
-JSON response with per-page text
+Chunking (RecursiveCharacterTextSplitter)
+    ↓
+Embeddings (future)
+    ↓
+Qdrant (future)
 ```
 
 ## Project structure
@@ -28,9 +31,11 @@ agentic-rag/
 │   │   │   └── documents.py     # POST /documents/upload
 │   │   └── ingestion/
 │   │       ├── __init__.py
-│   │       └── parser.py        # PDF text extraction
+│   │       ├── parser.py        # PDF text extraction
+│   │       └── chunker.py       # page text → retrieval chunks
 │   ├── tests/
-│   │   └── test_parser.py       # parser unit tests
+│   │   ├── test_parser.py       # parser unit tests
+│   │   └── test_chunker.py      # chunker unit tests
 │   └── requirements.txt
 ├── data/
 │   └── documents/               # saved uploads
@@ -73,6 +78,7 @@ Dependencies for this step:
 - `uvicorn` — ASGI server
 - `pypdf` — PDF text extraction
 - `python-multipart` — required for file uploads
+- `langchain-text-splitters` — text chunking (`RecursiveCharacterTextSplitter` only; not the full LangChain framework)
 
 ## Start the API
 
@@ -96,6 +102,8 @@ Accepts a single PDF file (`multipart/form-data`, field name: `file`).
 - Saves the file to `data/documents/`
 - Parses text **page by page** with `pypdf`
 - Returns JSON with filename, page count, and per-page text
+
+Chunking is a separate ingestion module (`chunker.py`). It is not wired into the upload route yet.
 
 ### Expected success response
 
@@ -153,23 +161,57 @@ You can also call it with curl:
 curl -X POST "http://127.0.0.1:8000/documents/upload" -F "file=@C:\path\to\example.pdf"
 ```
 
-## Run parser tests
+## Step 2: Document chunking
 
-The parser is tested independently of FastAPI. From `backend`:
+`backend/app/ingestion/chunker.py` takes the page-level output from `parser.py` and splits each page into smaller text chunks.
+
+Defaults (passed as function arguments, not scattered through the code):
+
+- `chunk_size = 1000`
+- `chunk_overlap = 150`
+
+Behavior:
+
+- Empty or whitespace-only pages are skipped
+- Extra whitespace is cleaned before splitting
+- Each chunk keeps `filename` and `page_number`
+- Chunk IDs are deterministic, for example `example_page_4_chunk_2`
+
+Example chunk:
+
+```json
+{
+  "chunk_id": "example_page_4_chunk_2",
+  "text": "...",
+  "metadata": {
+    "filename": "example.pdf",
+    "page_number": 4
+  }
+}
+```
+
+Chunking is **not** connected to embeddings or Qdrant yet.
+
+## Run tests
+
+From `backend`:
 
 ```powershell
 python -m unittest tests.test_parser
+python -m unittest tests.test_chunker
+```
+
+Run both:
+
+```powershell
+python -m unittest discover -s tests -v
 ```
 
 ## What is intentionally not in this step
 
-- Chunking
 - Embeddings
 - Qdrant / any vector database
-- LangChain / LangGraph
+- Full LangChain / LangGraph
 - LLMs
 - Frontend
-=======
-# AI-Document-Researcher
-Research into documents using RAG
->>>>>>> 582086e384b0b2f033b4c9c6d8b4d973bac8da8c
+- Wiring chunking into the upload API
