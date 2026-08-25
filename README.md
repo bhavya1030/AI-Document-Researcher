@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Agentic RAG Research Assistant
 
 Step-by-step Agentic RAG system. **This repository currently implements Step 1 only: document ingestion and PDF parsing.**
@@ -168,3 +169,7 @@ python -m unittest tests.test_parser
 - LangChain / LangGraph
 - LLMs
 - Frontend
+=======
+# AI-Document-Researcher
+Research into documents using RAG
+>>>>>>> 582086e384b0b2f033b4c9c6d8b4d973bac8da8c
