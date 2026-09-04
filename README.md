@@ -1,8 +1,8 @@
 # Agentic RAG Research Assistant
 
-Step-by-step Agentic RAG system. **This repository currently implements Step 1 (document ingestion and PDF parsing), Step 2 (document chunking), and Step 3 (embedding generation).**
+Step-by-step Agentic RAG system. **This repository currently implements Step 1 (document ingestion and PDF parsing), Step 2 (document chunking), Step 3 (embedding generation), and Step 4 (Qdrant vector storage).**
 
-Later steps (Qdrant, retrieval, reranking, LangGraph, LLMs) are intentionally not included yet.
+Later steps (retrieval, reranking, LangGraph, LLMs) are intentionally not included yet.
 
 ```
 PDF upload
@@ -15,7 +15,9 @@ Chunking (RecursiveCharacterTextSplitter)
     ↓
 Embeddings (sentence-transformers/all-MiniLM-L6-v2)
     ↓
-Qdrant (future)
+Qdrant (local persistent store)
+    ↓
+Retrieval (future)
 ```
 
 ## Project structure
@@ -34,13 +36,19 @@ agentic-rag/
 │   │       ├── parser.py        # PDF text extraction
 │   │       ├── chunker.py       # page text → retrieval chunks
 │   │       └── embedder.py      # chunks → dense vectors
+│   │   ├── vectorstore/
+│   │   │   ├── __init__.py
+│   │   │   └── qdrant_store.py  # local Qdrant upsert
+│   │   └── config.py            # QDRANT_PATH, collection name
 │   ├── tests/
 │   │   ├── test_parser.py       # parser unit tests
 │   │   ├── test_chunker.py      # chunker unit tests
-│   │   └── test_embedder.py     # embedding unit tests
+│   │   ├── test_embedder.py     # embedding unit tests
+│   │   └── test_qdrant_store.py # in-memory Qdrant tests
 │   └── requirements.txt
 ├── data/
-│   └── documents/               # saved uploads
+│   ├── documents/               # saved uploads
+│   └── qdrant/                  # local Qdrant files (gitignored)
 └── README.md
 ```
 
@@ -82,6 +90,7 @@ Dependencies for this step:
 - `python-multipart` — required for file uploads
 - `langchain-text-splitters` — text chunking (`RecursiveCharacterTextSplitter` only; not the full LangChain framework)
 - `sentence-transformers` — local embedding model (`all-MiniLM-L6-v2`)
+- `qdrant-client` — local persistent vector store (no Docker required)
 
 ## Start the API
 
@@ -252,11 +261,7 @@ Embeddings are **L2-normalized** (`normalize_embeddings=True`). For this model, 
 }
 ```
 
-Empty or whitespace-only chunks are skipped. Original `chunk_id`, `text`, and `metadata` are preserved. Vectors stay in Python memory; they are not written to Qdrant yet.
-
-### How Qdrant will use this (next step)
-
-Each returned object is one Qdrant point: the `embedding` is the vector, and `chunk_id` / `text` / `metadata` become the payload. Collection vector size must equal `get_embedding_dimension()`.
+Empty or whitespace-only chunks are skipped. Original `chunk_id`, `text`, and `metadata` are preserved. The next module writes those objects into Qdrant.
 
 ### Pipeline
 
@@ -265,9 +270,65 @@ PDF
  → Parser     (page text)
  → Chunker    (smaller passages + metadata)
  → Embedder   (same passages + 384-d vectors)
+ → Qdrant     (points: id + vector + payload)
 ```
 
 The embedder is **not** wired into `POST /documents/upload` yet.
+
+## Step 4: Qdrant vector storage
+
+`backend/app/vectorstore/qdrant_store.py` takes embedder output and upserts it into a local Qdrant collection named `document_chunks`.
+
+### Why Qdrant
+
+A normal database (SQLite, Postgres) is built for exact lookups and structured filters. A **vector database** stores high-dimensional embeddings and finds *nearest neighbors* — chunks whose meaning is close to a query. Qdrant is that store for this project.
+
+### What a collection is
+
+A collection is one named vector index. Ours is `document_chunks`. Every point in it must have the **same vector size** and the **same distance metric**.
+
+### What a point contains
+
+Each stored chunk is one **point**:
+
+| Part | Meaning |
+| --- | --- |
+| **ID** | Deterministic UUID derived from `chunk_id` (so re-ingest updates, not duplicates) |
+| **Vector** | The embedding from MiniLM |
+| **Payload** | JSON metadata used later for citations |
+
+Payload (the original embedding is the vector, not copied into payload):
+
+```json
+{
+  "text": "The Transformer architecture...",
+  "filename": "paper.pdf",
+  "page_number": 1,
+  "chunk_id": "paper_page_1_chunk_1"
+}
+```
+
+### Why vector dimension must match the embedding model
+
+Qdrant cannot mix 384-d MiniLM vectors with a collection created for another size. Collection size is taken from `Embedder.dimension` / `get_embedding_dimension()` (384 for `all-MiniLM-L6-v2`), not hardcoded in the store.
+
+### Why cosine distance
+
+MiniLM embeddings are L2-normalized. Cosine similarity measures angle between vectors, which matches semantic closeness. On unit vectors, cosine is equivalent to a dot product.
+
+### Why local persistent Qdrant
+
+Development uses Qdrant's embedded client (`QdrantClient(path=...)`), not Docker and not Qdrant Cloud. Vectors survive process restarts. Tests use `QdrantClient(":memory:")` so they never write to disk.
+
+### Where data is stored
+
+Default path: `agentic-rag/data/qdrant/` (`QDRANT_PATH`). Collection name: `document_chunks` (`QDRANT_COLLECTION_NAME`). Both can be overridden with environment variables.
+
+### Why Qdrant data is not committed
+
+The files under `data/qdrant/` are a local index rebuilt from PDFs. They are machine-specific, large, and listed in `.gitignore`.
+
+This module is **not** wired into `POST /documents/upload`. Similarity search is **not** implemented yet.
 
 ## Run tests
 
@@ -281,9 +342,10 @@ pip install -r requirements.txt
 python -m unittest tests.test_parser
 python -m unittest tests.test_chunker
 python -m unittest tests.test_embedder
+python -m unittest tests.test_qdrant_store
 ```
 
-The first `test_embedder` run downloads `all-MiniLM-L6-v2` (one-time). Later runs reuse the local cache and the process-wide model.
+The first `test_embedder` run downloads `all-MiniLM-L6-v2` (one-time). Later runs reuse the local cache and the process-wide model. Qdrant tests use an in-memory client and do not touch `data/qdrant/`.
 
 Run all tests:
 
@@ -293,10 +355,9 @@ python -m unittest discover -s tests -v
 
 ## What is intentionally not in this step
 
-- Qdrant / any vector database
 - Retrieval / similarity search
 - Reranking
 - Full LangChain / LangGraph
 - LLMs
 - Frontend
-- Wiring chunking or embeddings into the upload API
+- Wiring chunking, embeddings, or Qdrant into the upload API
