@@ -5,6 +5,8 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from app.ingestion.parser import PdfParseError, parse_pdf
+from app.ingestion.pipeline import ingest_pages
+from app.vectorstore.qdrant_store import QdrantStoreError
 
 router = APIRouter()
 
@@ -25,7 +27,7 @@ def _is_pdf_filename(filename: str) -> bool:
 
 @router.post("/documents/upload")
 async def upload_document(file: UploadFile = File(...)) -> dict:
-    """Accept a PDF, save it, parse it page-by-page, and return extracted text."""
+    """Accept a PDF, parse it, chunk, embed, and upsert into Qdrant."""
     original_name = file.filename or ""
     safe_name = Path(original_name).name
 
@@ -69,14 +71,22 @@ async def upload_document(file: UploadFile = File(...)) -> dict:
             detail=str(exc),
         ) from exc
 
+    try:
+        ingested = ingest_pages(parsed_pages)
+    except QdrantStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to store document vectors: {exc}",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to ingest document: {exc}",
+        ) from exc
+
     return {
         "filename": safe_name,
         "total_pages": len(parsed_pages),
-        "pages": [
-            {
-                "page_number": page["page_number"],
-                "text": page["text"],
-            }
-            for page in parsed_pages
-        ],
+        "chunk_count": ingested["chunk_count"],
+        "vector_count": ingested["vector_count"],
     }

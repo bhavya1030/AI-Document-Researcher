@@ -1,8 +1,8 @@
 # Agentic RAG Research Assistant
 
-Step-by-step Agentic RAG system. **This repository currently implements Step 1 (document ingestion and PDF parsing), Step 2 (document chunking), Step 3 (embedding generation), and Step 4 (Qdrant vector storage).**
+Step-by-step Agentic RAG system. **This repository currently implements Step 1 (document ingestion and PDF parsing), Step 2 (document chunking), Step 3 (embedding generation), Step 4 (Qdrant vector storage), and Step 5 (semantic retrieval).**
 
-Later steps (retrieval, reranking, LangGraph, LLMs) are intentionally not included yet.
+Later steps (reranking, LangGraph, LLMs) are intentionally not included yet.
 
 ```
 PDF upload
@@ -17,7 +17,7 @@ Embeddings (sentence-transformers/all-MiniLM-L6-v2)
     ↓
 Qdrant (local persistent store)
     ↓
-Retrieval (future)
+Semantic retrieval
 ```
 
 ## Project structure
@@ -35,16 +35,22 @@ agentic-rag/
 │   │       ├── __init__.py
 │   │       ├── parser.py        # PDF text extraction
 │   │       ├── chunker.py       # page text → retrieval chunks
-│   │       └── embedder.py      # chunks → dense vectors
+│   │       ├── embedder.py      # chunks → dense vectors
+│   │       └── pipeline.py      # parse output → chunk → embed → Qdrant
 │   │   ├── vectorstore/
 │   │   │   ├── __init__.py
-│   │   │   └── qdrant_store.py  # local Qdrant upsert
+│   │   │   └── qdrant_store.py  # local Qdrant upsert + search
+│   │   ├── retrieval/
+│   │   │   ├── __init__.py
+│   │   │   └── retriever.py     # query → embedding → nearest chunks
 │   │   └── config.py            # QDRANT_PATH, collection name
 │   ├── tests/
 │   │   ├── test_parser.py       # parser unit tests
 │   │   ├── test_chunker.py      # chunker unit tests
 │   │   ├── test_embedder.py     # embedding unit tests
-│   │   └── test_qdrant_store.py # in-memory Qdrant tests
+│   │   ├── test_qdrant_store.py # in-memory Qdrant tests
+│   │   ├── test_retriever.py    # semantic retrieval tests
+│   │   └── test_ingestion_pipeline.py  # upload → Qdrant integration
 │   └── requirements.txt
 ├── data/
 │   ├── documents/               # saved uploads
@@ -113,9 +119,7 @@ Accepts a single PDF file (`multipart/form-data`, field name: `file`).
 - Validates that the upload is a PDF
 - Saves the file to `data/documents/`
 - Parses text **page by page** with `pypdf`
-- Returns JSON with filename, page count, and per-page text
-
-Chunking is a separate ingestion module (`chunker.py`). It is not wired into the upload route yet.
+- Chunks pages, embeds with the shared MiniLM model, and upserts into Qdrant
 
 ### Expected success response
 
@@ -123,24 +127,10 @@ Chunking is a separate ingestion module (`chunker.py`). It is not wired into the
 {
   "filename": "example.pdf",
   "total_pages": 3,
-  "pages": [
-    {
-      "page_number": 1,
-      "text": "Text extracted from page 1..."
-    },
-    {
-      "page_number": 2,
-      "text": "Text extracted from page 2..."
-    },
-    {
-      "page_number": 3,
-      "text": ""
-    }
-  ]
+  "chunk_count": 8,
+  "vector_count": 8
 }
 ```
-
-Pages with no extractable text still appear in `pages`, with `"text": ""`.
 
 ### Error cases
 
@@ -164,7 +154,7 @@ Pages with no extractable text still appear in `pages`, with `"text": ""`.
    - HTTP 200
    - `filename` matches the uploaded file
    - `total_pages` is correct
-   - `pages` is a list of `{ "page_number", "text" }` objects
+   - `chunk_count` and `vector_count` are present
 8. Confirm the same PDF now exists under `agentic-rag/data/documents/`.
 
 You can also call it with curl:
@@ -271,6 +261,7 @@ PDF
  → Chunker    (smaller passages + metadata)
  → Embedder   (same passages + 384-d vectors)
  → Qdrant     (points: id + vector + payload)
+ → Retriever  (query embedding → nearest chunks)
 ```
 
 The embedder is **not** wired into `POST /documents/upload` yet.
@@ -328,7 +319,33 @@ Default path: `agentic-rag/data/qdrant/` (`QDRANT_PATH`). Collection name: `docu
 
 The files under `data/qdrant/` are a local index rebuilt from PDFs. They are machine-specific, large, and listed in `.gitignore`.
 
-This module is **not** wired into `POST /documents/upload`. Similarity search is **not** implemented yet.
+This module is **not** wired into `POST /documents/upload`.
+
+## Step 5: Semantic retrieval
+
+`backend/app/retrieval/retriever.py` embeds a user query with the **same** MiniLM model used at ingest time, then asks Qdrant for the nearest `document_chunks`.
+
+Flow:
+
+```
+query text
+ → Embedder.embed_query()     # same model + L2 normalization as chunks
+ → QdrantStore.search()       # cosine nearest neighbors
+ → [{ text, score, filename, page_number, chunk_id }, ...]
+```
+
+Default `top_k` is 5. An optional `score_threshold` drops weak cosine matches. Empty queries and empty collections return `[]`.
+
+Example:
+
+```python
+from app.retrieval.retriever import Retriever
+
+results = Retriever().retrieve("How does the Transformer use attention?", top_k=5)
+print(results[0]["text"], results[0]["score"], results[0]["filename"])
+```
+
+Upload now runs parse → chunk → embed → Qdrant. Retrieval is not exposed as an HTTP route yet.
 
 ## Run tests
 
@@ -343,6 +360,14 @@ python -m unittest tests.test_parser
 python -m unittest tests.test_chunker
 python -m unittest tests.test_embedder
 python -m unittest tests.test_qdrant_store
+python -m unittest tests.test_retriever
+python -m unittest tests.test_ingestion_pipeline
+```
+
+Or with pytest, from `backend`:
+
+```powershell
+python -m pytest
 ```
 
 The first `test_embedder` run downloads `all-MiniLM-L6-v2` (one-time). Later runs reuse the local cache and the process-wide model. Qdrant tests use an in-memory client and do not touch `data/qdrant/`.
@@ -355,9 +380,8 @@ python -m unittest discover -s tests -v
 
 ## What is intentionally not in this step
 
-- Retrieval / similarity search
+- Retrieval HTTP route
 - Reranking
 - Full LangChain / LangGraph
-- LLMs
+- LLMs / answer generation
 - Frontend
-- Wiring chunking, embeddings, or Qdrant into the upload API

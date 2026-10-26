@@ -1,9 +1,8 @@
 """Persist embedded chunks in a local Qdrant collection.
 
 This module does not parse PDFs, chunk text, or generate embeddings.
-It only turns embedder output into Qdrant points (id + vector + payload).
-
-Similarity search is intentionally not implemented here.
+It stores embedder output as Qdrant points (id + vector + payload)
+and runs nearest-neighbor search over those vectors.
 """
 
 from __future__ import annotations
@@ -187,6 +186,49 @@ class QdrantStore:
         payload["id"] = str(record.id)
         return payload
 
+    def search(
+        self,
+        query_vector: list[float],
+        *,
+        top_k: int = 5,
+        score_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Nearest-neighbor search. Higher cosine score is more similar."""
+        if top_k <= 0:
+            raise QdrantStoreError("top_k must be a positive integer")
+
+        vector_size = self._resolve_vector_size()
+        vector = _as_vector(query_vector, chunk_id="query", expected_size=vector_size)
+
+        if not self.collection_exists():
+            return []
+
+        try:
+            response = self.client.query_points(
+                collection_name=self.collection_name,
+                query=vector,
+                limit=top_k,
+                score_threshold=score_threshold,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            raise QdrantStoreError(f"Unable to search collection: {exc}") from exc
+
+        results: list[dict[str, Any]] = []
+        for hit in response.points:
+            payload = dict(hit.payload or {})
+            results.append(
+                {
+                    "text": payload.get("text", ""),
+                    "score": float(hit.score),
+                    "filename": payload.get("filename"),
+                    "page_number": payload.get("page_number"),
+                    "chunk_id": payload.get("chunk_id"),
+                }
+            )
+        return results
+
     def _point_from_chunk(
         self,
         chunk: Any,
@@ -259,3 +301,14 @@ def _as_vector(embedding: Any, *, chunk_id: str, expected_size: int) -> list[flo
             f"expected {expected_size}"
         )
     return vector
+
+
+_store: QdrantStore | None = None
+
+
+def get_qdrant_store(*, vector_size: int | None = None) -> QdrantStore:
+    """Return the process-wide store so the local Qdrant path is opened once."""
+    global _store
+    if _store is None:
+        _store = QdrantStore(vector_size=vector_size)
+    return _store

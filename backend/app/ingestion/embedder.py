@@ -82,13 +82,7 @@ class Embedder:
         if not texts:
             return []
 
-        vectors = self._model.encode(
-            texts,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=self.normalize,
-            show_progress_bar=False,
-        )
+        vectors = self._encode_texts(texts)
 
         dimension = self.dimension
         embedded: list[dict[str, Any]] = []
@@ -111,6 +105,29 @@ class Embedder:
 
         return embedded
 
+    def embed_query(self, text: str) -> list[float]:
+        """Encode one query with the same model and normalization as document chunks."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Query text must be a non-empty string")
+
+        vector = self._encode_texts([text])[0]
+        embedding = [float(value) for value in vector]
+        if len(embedding) != self.dimension:
+            raise RuntimeError(
+                f"Model produced a query vector of length {len(embedding)}, "
+                f"expected {self.dimension}"
+            )
+        return embedding
+
+    def _encode_texts(self, texts: list[str]):
+        return self._model.encode(
+            texts,
+            batch_size=self.batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=self.normalize,
+            show_progress_bar=False,
+        )
+
 
 # One process-wide embedder so the model is not reloaded per request.
 _embedder: Embedder | None = None
@@ -132,3 +149,8 @@ def get_embedding_dimension() -> int:
 def embed_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Encode chunks with the shared process-wide model."""
     return get_embedder().embed_chunks(chunks)
+
+
+def embed_query(text: str) -> list[float]:
+    """Encode a query with the shared process-wide model."""
+    return get_embedder().embed_query(text)

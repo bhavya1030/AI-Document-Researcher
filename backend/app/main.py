@@ -1,4 +1,4 @@
-"""FastAPI application entrypoint for Step 1: PDF ingestion."""
+"""FastAPI application entrypoint."""
 
 from fastapi import FastAPI
 
@@ -6,7 +6,7 @@ from app.api.documents import router as documents_router
 
 app = FastAPI(
     title="Agentic RAG Research Assistant",
-    description="Step 1: Document ingestion and PDF parsing.",
+    description="PDF upload, parse, chunk, embed, and store in Qdrant.",
     version="0.1.0",
 )
 
